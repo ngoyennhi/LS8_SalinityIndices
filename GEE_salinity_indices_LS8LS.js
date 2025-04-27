@@ -1,157 +1,199 @@
+// ==================================================================
+// Landsat Masking, Scaling, Visualization, and Index Calculation
+// ==================================================================
+
+// --- Functions ---
+
 // Function to mask clouds and shadows in Landsat 8 Collection 2 L2
 function maskL8sr(image) {
   var cloudShadowBitMask = (1 << 3);
   var cloudsBitMask = (1 << 4);
   var qa = image.select('QA_PIXEL');
   var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
-                 .and(qa.bitwiseAnd(cloudsBitMask).eq(0));
+               .and(qa.bitwiseAnd(cloudsBitMask).eq(0));
   return image.updateMask(mask);
 }
 
-//  1. Charger Tiền Giang depuis GAUL
+// Function to apply scaling factors for Landsat Collection 2 SR optical bands
+function scaleLandsatSR(image) {
+  var opticalBands = image.select('SR_B.*')
+                          .multiply(0.0000275)
+                          .add(-0.2);
+  return image.addBands(opticalBands, null, true);
+}
+
+// --- Workflow ---
+
+// 1. Define Area of Interest (AOI) - Tien Giang
 var provinces = ee.FeatureCollection("FAO/GAUL/2015/level1");
 var tienGiang = provinces.filter(ee.Filter.and(
   ee.Filter.eq('ADM0_NAME', 'Viet Nam'),
   ee.Filter.eq('ADM1_NAME', 'Tien Giang')
 ));
 Map.centerObject(tienGiang, 9);
-Map.addLayer(tienGiang, {color: 'FF0000', strokeWidth: 2}, 'Tien Giang Outline', false);
+Map.addLayer(tienGiang, {color: 'FF0000', strokeWidth: 2, fillColor: '00000000'}, 'Tien Giang Outline');
 
-//  2. Define the full Image ID
+// 2. Define Image ID and Load Image
 var imageId = 'LANDSAT/LC08/C02/T1_L2/LC08_125053_20210703';
+var rawImage = ee.Image(imageId);
+print('Loaded Raw Image:', rawImage);
 
-//  3. Load the specific image
-var specificImage = ee.Image(imageId);
-
-//  4. Apply the cloud mask
-var maskedImage = maskL8sr(specificImage);
-
-//  5. Define visualization parameters for SINGLE BAND (Grayscale)
-// --- MODIFICATION FOR GRAYSCALE ---
-var bandToShow = 'SR_B5'; // Example: Near Infrared band
-//IMPORTANT: Use Inspector tool on the map to find suitable min/max for SR_B5
-var grayVisParams = {
-  bands: [bandToShow],
-  min: 0,  // EXAMPLE MIN - Adjust based on Inspector!
-  max: 20000   // EXAMPLE MAX - Adjust based on Inspector!
-};
-
-//  6. Add the masked, clipped, grayscale image to the map
-Map.addLayer(
-  maskedImage.clip(tienGiang),
-  grayVisParams, // Use the grayscale visualization parameters
-  bandToShow + ' (Grayscale, Masked & Clipped)'
-);
-
-print('Displaying band:', bandToShow);
-
-// ---------------------------------------------------------------
-//  Calculate the three specified Salinity Indices
-// ---------------------------------------------------------------
-
-// --- Index 1: SI = sqrt(Green * Red) ---
-var green_b3 = maskedImage.select('SR_B3');
-var red_b4 = maskedImage.select('SR_B4');
-var SI = green_b3.multiply(red_b4).sqrt().rename('SI');
-print('SI Image:', SI);
-
-// --- Index 2: SI2 = sqrt(Green^2 + Red^2 + NIR^2) ---
-var nir_b5 = maskedImage.select('SR_B5');
-var SI2 = green_b3.pow(2)
-            .add(red_b4.pow(2))
-            .add(nir_b5.pow(2))
-            .sqrt().rename('SI2');
-print('SI2 Image:', SI2);
-
-// --- Index 3: NDSI = (Red - NIR) / (Red + NIR) ---
-// This is equivalent to -NDVI. Using normalizedDifference for calculation.
-// normalizedDifference calculates (Band1 - Band2) / (Band1 + Band2)
-var NDSI = maskedImage.normalizedDifference(['SR_B4', 'SR_B5']).rename('NDSI');
-print('NDSI (-NDVI) Image:', NDSI);
+// 3. Apply Cloud Mask FIRST
+var maskedImage = maskL8sr(rawImage);
+print('Masked Image (before scaling):', maskedImage);
 
 
-// ---------------------------------------------------------------
-//  Define Visualization Parameters for Each Index
-// IMPORTANT: Adjust min/max for EACH index using the Inspector tool!
-// ---------------------------------------------------------------
-
-var visParams_SI = {
-  min: 9000, // Adjust! Check SI layer with Inspector
-  max: 15000, // Adjust! Check SI layer with Inspector
-  palette: ['eff3ff', 'bdd7e7', '6baed6', '3182bd', '08519c'] // Example: Sequential Blue
-};
-
-var visParams_SI2 = {
-  min: 9000, // Adjust! Check SI2 layer with Inspector (likely higher max needed)
-  max: 30000, // Adjust! Check SI2 layer with Inspector
-  palette: ['fff7ec', 'fee8c8', 'fdd49e', 'fdbb84', 'fc8d59', 'ef6548', 'd7301f', '990000'] // Example: Sequential Orange-Red
-};
-
-var visParams_NDSI = {
-  min: -0.5, // Adjust! Check NDSI layer with Inspector (Range is -1 to 1, typical ground values vary)
-  max: 0.5,  // Adjust! Check NDSI layer with Inspector
-  palette: ['0000ff', '00ffff', 'ffffff', 'ffff00', 'ff0000'] // Example: Blue -> Cyan -> White -> Yellow -> Red
-};
+// 4. Apply Scaling AFTER Masking
+var scaledMaskedImage = scaleLandsatSR(maskedImage);
+print('Scaled and Masked Image:', scaledMaskedImage);
 
 
-// ---------------------------------------------------------------
-//  Add Calculated Indices to the Map (Clipped)
-// ---------------------------------------------------------------
+// ========== 5. CALCULATE INDICES ==========
+print('Calculating Indices...');
 
-Map.addLayer(SI.clip(tienGiang), visParams_SI, 'Index SI (sqrt(G*R))', false); // Initially off
-Map.addLayer(SI2.clip(tienGiang), visParams_SI2, 'Index SI2 (sqrt(G^2+R^2+N^2))', false); // Initially off
-Map.addLayer(NDSI.clip(tienGiang), visParams_NDSI, 'Index NDSI ((R-N)/(R+N))', true); // Initially on
+// Select the required SCALED bands
+var blue = scaledMaskedImage.select('SR_B2');  // Blue
+var green = scaledMaskedImage.select('SR_B3'); // Green
+var red = scaledMaskedImage.select('SR_B4');   // Red
+var nir = scaledMaskedImage.select('SR_B5');   // NIR
 
-// Optional: Add the masked true color image for reference
-var visParams_RGB = { bands: ['SR_B4', 'SR_B3', 'SR_B2'], min: 5000, max: 15000 };
-Map.addLayer(maskedImage.clip(tienGiang), visParams_RGB, 'Masked True Color Image', false);
+// --- Calculate Salinity Indices (SI) ---
+// SI1 = sqrt(Green^2 + Red^2)
+var si1 = green.pow(2).add(red.pow(2)).sqrt().rename('SI1');
+print('SI1 Image:', si1);
+
+// SI2 = sqrt(Green * Red)
+var si2 = green.multiply(red).sqrt().rename('SI2');
+print('SI2 Image:', si2);
+
+// SI3 = sqrt(Blue * Red)
+var si3 = blue.multiply(red).sqrt().rename('SI3');
+print('SI3 Image:', si3);
+
+// SI4a = sqrt(Red * NIR) / Green
+var si4a = red.multiply(nir).sqrt().divide(green).rename('SI4a');
+print('SI4a Image:', si4a);
+
+// SI5 = Blue / Red  (Previously SI4b)
+var si5 = blue.divide(red).rename('SI5'); // Renamed variable and band
+print('SI5 Image:', si5); // Updated print
+
+// --- Calculate Normalized Difference Salinity Index (NDSI) ---
+// NDSI = (Red - NIR) / (Red + NIR)
+var ndsi = scaledMaskedImage.normalizedDifference(['SR_B4', 'SR_B5']).rename('NDSI');
+print('NDSI Image:', ndsi);
+
+// --- Calculate Normalized Difference Vegetation Index (NDVI) ---
+// NDVI = (NIR - Red) / (NIR + Red)
+var ndvi = scaledMaskedImage.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+print('NDVI Image:', ndvi);
+
+// --- Calculate Soil Adjusted Vegetation Index (SAVI) ---
+// Using standard formula SAVI = ((NIR - Red) / (NIR + Red + L)) * (1 + L), with L=0.5
+var L = 0.5;
+var savi = scaledMaskedImage.expression(
+    '(1 + L) * (NIR - RED) / (NIR + RED + L)', {
+      'NIR': nir,
+      'RED': red,
+      'L': L
+    }).rename('SAVI');
+print('SAVI Image:', savi);
+
+// --- Calculate Vegetation Soil Salinity Index (VSSI) ---
+// VSSI = 2 * Green - 5 * (Red + NIR)
+var vssi = scaledMaskedImage.expression(
+    '2 * bGREEN - 5 * (bRED + bNIR)', {
+      'bGREEN': green,
+      'bRED': red,
+      'bNIR': nir
+    }).rename('VSSI');
+print('VSSI Image:', vssi);
+
+// ==========================================
 
 
-// ---------------------------------------------------------------
-//  Export the Calculated Indices to Google Drive as GeoTIFF
-// ---------------------------------------------------------------
+// 6. Define Visualization Parameters
 
-// Define export parameters common to all exports
-var exportRegion = tienGiang.geometry(); // Export the area defined by Tien Giang boundary
-var exportScale = 30; // Export at Landsat's 30m resolution
-var exportCrs = 'EPSG:4326'; // Set Coordinate Reference System to WGS84
-var driveFolder = 'GEE_Salinity_Indices'; // Optional: Name of folder in your Google Drive root
+// True Color visualization
+var visParamsTrueColor = { bands: ['SR_B4', 'SR_B3', 'SR_B2'], min: 0.0, max: 0.3 };
 
-// --- Export Task for Index 1: SI ---
+// Grayscale visualization for NIR
+var visParamsGrayNIR = { bands: ['SR_B5'], min: 0.0, max: 0.5 }; // Adjust max!
+
+// --- Visualization for Indices ---
+// NOTE: Min/Max values for SI*, VSSI are EXAMPLES. Use Inspector tool to adjust!
+var visSI1 = { bands: ['SI1'], min: 0.05, max: 0.25, palette: ['#fde725', '#5ec962', '#21918c', '#3b528b', '#440154'] }; // Viridis palette
+var visSI2 = { bands: ['SI2'], min: 0.05, max: 0.15, palette: ['#fde725', '#5ec962', '#21918c', '#3b528b', '#440154'] };
+var visSI3 = { bands: ['SI3'], min: 0.05, max: 0.15, palette: ['#fde725', '#5ec962', '#21918c', '#3b528b', '#440154'] };
+var visSI4a = { bands: ['SI4a'], min: 1.5, max: 2.5, palette: ['#fde725', '#5ec962', '#21918c', '#3b528b', '#440154'] };
+var visSI5 = { bands: ['SI5'], min: 0.6, max: 1, palette: ['#fde725', '#5ec962', '#21918c', '#3b528b', '#440154'] }; // Renamed variable and band
+var visNDSI = { bands: ['NDSI'], min: -1, max: 1, palette: ['006400', 'adff2f', 'ffff00', 'ffa500', 'ff0000', '800080'] }; // Green->Purple
+var visNDVI = { bands: ['NDVI'], min: -0.2, max: 0.8, palette: ['#ffffe5', '#f7fcb9', '#d9f0a3', '#addd8e', '#78c679', '#41ab5d', '#238443', '#005a32'] }; // Standard NDVI palette
+var visSAVI = { bands: ['SAVI'], min: 0.005, max: 0.7, palette: ['#ffffe5', '#f7fcb9', '#d9f0a3', '#addd8e', '#78c679', '#41ab5d', '#238443', '#005a32'] }; // Similar to NDVI
+var visVSSI = { bands: ['VSSI'], min: -2.0, max: 0, palette: ['blue', 'cyan', 'green', 'yellow', 'red'] }; // Adjust min/max!
+
+// ==========================================
+
+
+// 7. Add Processed Layers to the Map
+
+// Add True Color layer (visible by default)
+Map.addLayer(scaledMaskedImage.clip(tienGiang), visParamsTrueColor, 'Landsat Scaled Masked (True Color)', true);
+
+// Add Grayscale NIR layer (hidden by default)
+Map.addLayer(scaledMaskedImage.clip(tienGiang), visParamsGrayNIR, 'Landsat Scaled Masked (NIR Grayscale)', false);
+
+// --- Add Index Layers (hidden by default) ---
+Map.addLayer(si1.clip(tienGiang), visSI1, 'SI1 = sqrt(G^2+R^2)', false);
+Map.addLayer(si2.clip(tienGiang), visSI2, 'SI2 = sqrt(G*R)', false);
+Map.addLayer(si3.clip(tienGiang), visSI3, 'SI3 = sqrt(B*R)', false);
+Map.addLayer(si4a.clip(tienGiang), visSI4a, 'SI4a = sqrt(R*NIR)/G', false);
+Map.addLayer(si5.clip(tienGiang), visSI5, 'SI5 = B/R', false);
+Map.addLayer(ndsi.clip(tienGiang), visNDSI, 'NDSI = (R-NIR)/(R+NIR)', false);
+Map.addLayer(ndvi.clip(tienGiang), visNDVI, 'NDVI = (NIR-R)/(NIR+R)', false);
+Map.addLayer(savi.clip(tienGiang), visSAVI, 'SAVI (L=0.5)', false);
+Map.addLayer(vssi.clip(tienGiang), visVSSI, 'VSSI = 2G-5(R+NIR)', false);
+// ==========================================
+
+
+print('Added all layers to map. Use Inspector tool to refine visualization ranges for SI*, SAVI, VSSI.');
+
+
+// ========== 8. EXPORT CALCULATED INDICES ==========
+print('Setting up export task...');
+
+// Combine all calculated indices into one multi-band image
+// Each index will be a separate band in the output GeoTIFF
+var allIndicesImage = ee.Image().addBands([
+    si1,
+    si2,
+    si3,
+    si4a,
+    si5,
+    ndsi,
+    ndvi,
+    savi,
+    vssi
+  ]); // Add other indices if needed
+
+print('Combined indices image:', allIndicesImage); // Check band names
+var allIndicesImageFloat = allIndicesImage.toFloat();
+
+
+// Define export parameters
+var exportFolder = 'GEE_Exports'; 
+var exportFileName = 'Landsat_Indices_TienGiang_20210703'; 
+var exportScale = 30; // Landsat resolution in meters
+var exportCRS = 'EPSG:32648'; // UTM Zone 48N (covers Tien Giang) - Good for analysis
+
+// Create the export task using the CASTED image
 Export.image.toDrive({
-  image: SI,                           // The SI index image (single band)
-  description: 'Export_SI_TienGiang_20210703', // Name of the task in the 'Tasks' tab
-  folder: driveFolder,                 // Folder in Google Drive to save to
-  fileNamePrefix: 'SI_TienGiang_20210703',     // Base name for the output GeoTIFF file
-  region: exportRegion,                // Specify the geometry to export
-  scale: exportScale,                  // Specify the pixel resolution
-  crs: exportCrs,                      // Specify the coordinate system (WGS84)
-  maxPixels: 1e10                      // Increase maxPixels for larger exports if needed
-  // fileFormat: 'GeoTIFF'             // Default format is GeoTIFF, so this line is optional
+  image: allIndicesImageFloat,         // <<< Use the casted image
+  description: exportFileName,       // Name of the task in GEE Tasks tab
+  folder: exportFolder,              // Google Drive folder
+  fileNamePrefix: exportFileName,    // Output file name (will add .tif)
+  region: tienGiang.geometry(),      // Area to export (geometry of Tien Giang)
+  scale: exportScale,                // Resolution
+  crs: exportCRS,                    // Coordinate Reference System
+  maxPixels: 1e10                    // Allow more pixels for export
 });
-
-// --- Export Task for Index 2: SI2 ---
-Export.image.toDrive({
-  image: SI2,                          // The SI2 index image
-  description: 'Export_SI2_TienGiang_20210703',// Unique task name
-  folder: driveFolder,
-  fileNamePrefix: 'SI2_TienGiang_20210703',    // Unique filename prefix
-  region: exportRegion,
-  scale: exportScale,
-  crs: exportCrs,
-  maxPixels: 1e10
-});
-
-// --- Export Task for Index 3: NDSI ---
-Export.image.toDrive({
-  image: NDSI,                         // The NDSI index image
-  description: 'Export_NDSI_TienGiang_20210703',// Unique task name
-  folder: driveFolder,
-  fileNamePrefix: 'NDSI_TienGiang_20210703',   // Unique filename prefix
-  region: exportRegion,
-  scale: exportScale,
-  crs: exportCrs,
-  maxPixels: 1e10
-});
-
-print('Export tasks created. Check the "Tasks" tab to run them.');
